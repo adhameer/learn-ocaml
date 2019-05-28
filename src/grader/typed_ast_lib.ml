@@ -1609,3 +1609,45 @@ let cons_pat = Typed_ast_fragments.cons_pat
 let cons_expr = Typed_ast_fragments.cons_expr
 let apply_expr = Typed_ast_fragments.apply_expr
 let match_expr = Typed_ast_fragments.match_expr
+
+(* Typed holes *)
+let typed_hole_checker =
+  let open Parsetree in
+  let open Typed_ast in
+  let open Asttypes in
+  let is_hole attr =
+    match attr with
+    | ({txt = "hole name"; loc = _}, _) -> true
+    | _ -> false
+  in
+  let string_of_longident lid =
+    let open Longident in
+    match lid with
+    | Lident str -> str
+    | _ -> assert false
+  in
+  let extract_hole_name str =
+    match str with
+    | PStr [{pstr_desc = Pstr_eval (expr, _); _}] ->
+        begin
+          match expr.pexp_desc with
+          | Pexp_ident ({txt = lid; loc = _}) ->
+              string_of_longident lid
+          | _ -> assert false
+        end
+    | _ -> assert false
+  in
+  let open Learnocaml_report in
+  let expression sub expr =
+    match List.find_opt is_hole expr.sexp_attrs with
+    | None -> default_checker.expression sub expr
+    | Some (_, str) ->
+        let hole_name = extract_hole_name str in
+        let typ = expr.sexp_type in
+        let () = Printtyp.type_expr Format.str_formatter typ in
+        let typ_str = Format.flush_str_formatter () in
+        [(expr.sexp_loc,
+          Message ([Text "Hole"; Code hole_name; Text "has type"; Code typ_str],
+                   Informative))]
+  in
+  {default_checker with expression}

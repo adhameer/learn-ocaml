@@ -23,9 +23,60 @@ and loc = Toploop_results.loc  = {
   loc_end: int * int;
 }
 
+let typedhole_mapper _argv =
+  let open Ast_mapper in
+  let open Asttypes in
+  let open Parsetree in
+
+  let usage_err = "[%typeof must be used with a name, e.g. [%typeof x]" in
+  let raise_usage_err loc =
+    raise (Location.Error (Location.error ~loc usage_err))
+  in
+  let noloc txt = {txt; loc = Location.none} in
+  let assert_false attrs =
+    let open Longident in
+    {pexp_desc =
+       Pexp_assert
+         {pexp_desc = Pexp_construct ({txt = Lident "false"; loc = Location.none}, None);
+          pexp_loc = Location.none;
+          pexp_attributes = []};
+     pexp_loc = Location.none;
+     pexp_attributes = attrs}
+  in
+
+
+  let string_of_longident lid loc =
+    let open Longident in
+    match lid with
+    | Lident str -> str
+    | _ -> raise_usage_err loc
+  in
+
+  let expr mapper expr =
+    match expr.pexp_desc with
+    | Pexp_extension ({txt = "typeof"; loc}, payload) ->
+        begin
+          match payload with
+          | PStr [{pstr_desc = Pstr_eval (expr, _); _}] ->
+              begin
+                match expr.pexp_desc with
+                | Pexp_ident ({txt = lid; loc = _}) ->
+                    (* Just sanity-check the string at compile-time *)
+                    let _ = string_of_longident lid in
+                    let attr = (noloc "hole name", payload) in
+                    let attrs = attr :: expr.pexp_attributes in
+                    assert_false attrs
+                | _ -> raise_usage_err loc
+              end
+          | _ -> raise_usage_err loc
+        end
+    | _ -> default_mapper.expr mapper expr
+  in
+  {default_mapper with expr}
+
 module Ppx = struct
 
-  let ppx_rewriters = ref []
+  let ppx_rewriters = ref [typedhole_mapper]
 
   let () =
     Ast_mapper.register_function :=
