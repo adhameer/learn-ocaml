@@ -134,6 +134,9 @@ module PtoS = struct
           let expr = expr_aux expr texpr in
           Sexp_construct (lid, Some expr)
 
+      | Pexp_variant (label, expo), Texp_variant (_, texpo) ->
+          Sexp_variant (label, map_opt2 expr_aux expo texpo)
+
       | Pexp_record (fields, expo),
         Texp_record {fields = tfields; extended_expression = texpo; _} ->
           treat_record_expr fields expo tfields texpo
@@ -146,6 +149,10 @@ module PtoS = struct
           let e2 = expr_aux e2 te2 in
           Sexp_setfield (e1, lid, e2)
 
+      | Pexp_array exprs, Texp_array texprs ->
+          let exprs = List.map2 expr_aux exprs texprs in
+          Sexp_array exprs
+
       | Pexp_ifthenelse (e1, e2, e3), Texp_ifthenelse(te1, te2, te3) ->
           Sexp_ifthenelse (expr_aux e1 te1,
                            expr_aux e2 te2,
@@ -155,27 +162,109 @@ module PtoS = struct
           let e2 = expr_aux e2 te2 in
           Sexp_sequence (e1, e2)
 
+      | Pexp_while (e1, e2), Texp_while (te1, te2) ->
+          let e1 = expr_aux e1 te1 in
+          let e2 = expr_aux e2 te2 in
+          Sexp_while (e1, e2)
+      | Pexp_for (pat, e1, e2, df, e3), Texp_for (id, _, te1, te2, _, te3) ->
+          let pat =
+            begin
+              (* Only valid patterns for loop indexes are var and any *)
+              match pat.ppat_desc with
+              | Ppat_any -> Spat_any
+              | Ppat_var str -> Spat_var (id, str)
+              | _ -> assert false
+            end
+          in
+          let e1 = expr_aux e1 te1 in
+          let e2 = expr_aux e2 te2 in
+          let e3 = expr_aux e3 te3 in
+          Sexp_for (pat, e1, e2, df, e3)
+
       | Pexp_constraint (expr, typ), _ ->
           begin
             match texpr.exp_extra with
-            | (Texp_constraint _, _, _) :: _ ->
+            | (Texp_constraint _, _, _) :: exp_extra ->
+                let texpr = {texpr with exp_extra} in
                 let expr = expr_aux expr texpr in
                 Sexp_constraint (expr, typ)
             | _ -> assert false
           end
+      | Pexp_coerce (expr, typo, typ), _ ->
+          begin
+            match texpr.exp_extra with
+            | (Texp_coerce _, _, _) :: exp_extra ->
+                let texpr = {texpr with exp_extra} in
+                let expr = expr_aux expr texpr in
+                Sexp_coerce (expr, typo, typ)
+            | _ -> assert false
+          end
+
+      | Pexp_send (expr, str), Texp_send (texpr, _, _) ->
+          let expr = expr_aux expr texpr in
+          Sexp_send (expr, str)
+      | Pexp_new lid, Texp_new (path, _, cd) ->
+          Sexp_new (path, lid, cd)
+      | Pexp_ident lid, Texp_instvar (path1, path2, _) ->
+          Sexp_instvar (path1, path2, lid)
+      | Pexp_setinstvar (str, expr), Texp_setinstvar (path1, path2, _, texpr) ->
+          let expr = expr_aux expr texpr in
+          Sexp_setinstvar (path1, path2, str, expr)
+      | Pexp_override lst, Texp_override (path, tlst) ->
+          let treat_lst (str, expr) (path, _, texpr) =
+            (path, str, expr_aux expr texpr)
+          in
+          let lst = List.map2 treat_lst lst tlst in
+          Sexp_override (path, lst)
+
+      | Pexp_letmodule (str, me, expr), Texp_letmodule (id, _, tme, texpr) ->
+          let me = module_expr me tme in
+          let expr = expr_aux expr texpr in
+          Sexp_letmodule (id, str, me, expr)
+      | Pexp_letexception (ec, expr), Texp_letexception (_, texpr) ->
+          let expr = expr_aux expr texpr in
+          Sexp_letexception (ec, expr)
 
       | Pexp_assert expr, Texp_assert texpr ->
           let expr = expr_aux expr texpr in
           Sexp_assert expr
 
+      | Pexp_lazy expr, Texp_lazy texpr ->
+          let expr = expr_aux expr texpr in
+          Sexp_lazy expr
+
+      | Pexp_poly (expr, typo), _ ->
+          begin
+            match texpr.exp_extra with
+            | (Texp_poly _, _, _) :: exp_extra ->
+                let texpr = {texpr with exp_extra} in
+                let expr = expr_aux expr texpr in
+                Sexp_poly (expr, typo)
+            | _ -> assert false
+          end
+
+      | Pexp_object cs, Texp_object _ ->
+          Sexp_object cs
+
+      | Pexp_pack me, Texp_pack tme ->
+          let me = module_expr me tme in
+          Sexp_pack me
+
       | Pexp_open (ovf, lid, expr), _ ->
           begin
             match texpr.exp_extra with
-            | (Texp_open _, _, _) :: _ ->
+            | (Texp_open _, _, _) :: exp_extra ->
+                let texpr = {texpr with exp_extra} in
                 let expr = expr_aux expr texpr in
                 Sexp_open (ovf, lid, expr)
             | _ -> assert false
           end
+
+      | Pexp_extension ext, Texp_extension_constructor _ ->
+          Sexp_extension ext
+
+      | Pexp_unreachable, Texp_unreachable ->
+          Sexp_unreachable
 
       | _ ->
           raise (UnimplementedConstruct "expression")
@@ -198,6 +287,10 @@ module PtoS = struct
         let pat = pattern pat tpat in
         Spat_alias (pat, id, str)
     | Ppat_constant c, Tpat_constant _ -> Spat_constant c
+
+    (* Intervals are translated into either constant or or *)
+    | Ppat_interval (c1, c2), (Tpat_constant _ | Tpat_or _) ->
+        Spat_interval (c1, c2)
 
     | Ppat_tuple pats, Tpat_tuple tpats ->
         let pats = List.map2 pattern pats tpats in
@@ -224,6 +317,10 @@ module PtoS = struct
         let pat = pattern pat tpat in
         Spat_construct (lid, Some pat)
 
+    | Ppat_variant (label, pato), Tpat_variant (_, tpato, _) ->
+        let pato = map_opt2 pattern pato tpato in
+        Spat_variant (label, pato)
+
     | Ppat_record (fields, cf), Tpat_record (tfields, _) ->
         let tfields =
           List.map
@@ -233,6 +330,10 @@ module PtoS = struct
         let fields = List.map2 (map_snd2 pattern) fields tfields in
         Spat_record (fields, cf)
 
+    | Ppat_array pats, Tpat_array tpats ->
+        let pats = List.map2 pattern pats tpats in
+        Spat_array pats
+
     | Ppat_or (p1, p2), Tpat_or (tp1, tp2, _) ->
         let p1 = pattern p1 tp1 in
         let p2 = pattern p2 tp2 in
@@ -241,9 +342,40 @@ module PtoS = struct
     | Ppat_constraint (pat, typ), _ ->
         begin
           match tpat.pat_extra with
-          | (Tpat_constraint _, _, _) :: _ ->
+          | (Tpat_constraint _, _, _) :: pat_extra ->
+              let tpat = {tpat with pat_extra} in
               let pat = pattern pat tpat in
               Spat_constraint (pat, typ)
+          | _ -> assert false
+        end
+
+    | Ppat_type lid, _ ->
+        begin
+          match tpat.pat_extra with
+          | (Tpat_type _, _, _) :: [] ->
+              Spat_type lid
+          | _ -> assert false
+        end
+
+    | Ppat_lazy pat, Tpat_lazy tpat ->
+        let pat = pattern pat tpat in
+        Spat_lazy pat
+
+    | Ppat_unpack str, _ ->
+        begin
+          match tpat.pat_extra with
+          | (Tpat_unpack, _, _) :: [] ->
+              Spat_unpack str
+          | _ -> assert false
+        end
+
+    | Ppat_open (lid, pat), _ ->
+        begin
+          match tpat.pat_extra with
+          | (Tpat_open _, _, _) :: pat_extra ->
+              let tpat = {tpat with pat_extra} in
+              let pat = pattern pat tpat in
+              Spat_open (lid, pat)
           | _ -> assert false
         end
 
@@ -276,6 +408,9 @@ module PtoS = struct
         Sstr_modtype mtd
     | Pstr_open od, Tstr_open _ ->
         Sstr_open od
+    | Pstr_include {pincl_mod; _}, Tstr_include {incl_mod; _} ->
+        let me = module_expr pincl_mod incl_mod in
+        Sstr_include me
     | _ -> raise (UnimplementedConstruct "structure_item")
 
   and module_binding mb tmb =
@@ -458,18 +593,27 @@ module PtoS = struct
   (* Typed_ast fragments of patterns without pattern variables *)
   let rec pat p =
     match p.ppat_desc with
-    | Ppat_var _
-    | Ppat_alias _ -> raise (UnimplementedConstruct "pat")
+    | Ppat_var _ -> raise (UnimplementedConstruct "Ppat_var")
+    | Ppat_alias _ -> raise (UnimplementedConstruct "Ppat_alias")
     | Ppat_any -> Spat_any
     | Ppat_constant c -> Spat_constant c
+    | Ppat_interval (c1, c2) -> Spat_interval (c1, c2)
     | Ppat_tuple pats -> Spat_tuple (List.map pat pats)
     | Ppat_construct (lid, pato) ->
         Spat_construct (lid, map_opt pat pato)
+    | Ppat_variant (label, pato) ->
+        Spat_variant (label, map_opt pat pato)
     | Ppat_record (fields, cf) ->
         Spat_record (List.map (map_snd pat) fields, cf)
+    | Ppat_array pats -> Spat_array (List.map pat pats)
     | Ppat_or (p1, p2) -> Spat_or (pat p1, pat p2)
     | Ppat_constraint (p, typ) -> Spat_constraint (pat p, typ)
-    | _ -> raise (UnimplementedConstruct "pat")
+    | Ppat_type lid -> Spat_type lid
+    | Ppat_lazy p -> Spat_lazy (pat p)
+    | Ppat_unpack str -> Spat_unpack str
+    | Ppat_exception _ -> raise (UnimplementedConstruct "Ppat_exception")
+    | Ppat_extension _ -> raise (UnimplementedConstruct "Ppat_extension")
+    | Ppat_open (lid, p) -> Spat_open (lid, pat p)
 
 end
 
@@ -522,6 +666,8 @@ module StoP = struct
           Pexp_tuple (List.map (sub.expression sub) exps)
       | Sexp_construct (lid, expo) ->
           Pexp_construct (lid, map_opt (sub.expression sub) expo)
+      | Sexp_variant (label, expo) ->
+          Pexp_variant (label, map_opt (sub.expression sub) expo)
       | Sexp_record (fields, expo) ->
           Pexp_record (List.map (map_snd @@ sub.expression sub) fields,
                        map_opt (sub.expression sub) expo)
@@ -531,6 +677,8 @@ module StoP = struct
           Pexp_setfield (sub.expression sub exp1,
                          lid,
                          sub.expression sub exp2)
+      | Sexp_array exps ->
+          Pexp_array (List.map (sub.expression sub) exps)
       | Sexp_ifthenelse (e1, e2, e3) ->
           Pexp_ifthenelse (sub.expression sub e1,
                            sub.expression sub e2,
@@ -538,13 +686,54 @@ module StoP = struct
       | Sexp_sequence (e1, e2) ->
           Pexp_sequence (sub.expression sub e1,
                          sub.expression sub e2)
+      | Sexp_while (e1, e2) ->
+          Pexp_while (sub.expression sub e1,
+                      sub.expression sub e2)
+      | Sexp_for (pat, e1, e2, df, e3) ->
+          Pexp_for (sub.pattern sub pat,
+                    sub.expression sub e1,
+                    sub.expression sub e2,
+                    df,
+                    sub.expression sub e3)
       | Sexp_constraint (exp, typ) ->
           Pexp_constraint (sub.expression sub exp, typ)
+      | Sexp_coerce (exp, typo, typ) ->
+          Pexp_coerce (sub.expression sub exp, typo, typ)
+      | Sexp_send (exp, str) ->
+          Pexp_send (sub.expression sub exp, str)
+      | Sexp_new (_, lid, _) ->
+          Pexp_new lid
+      | Sexp_instvar (_, _, lid) ->
+          Pexp_ident lid
+      | Sexp_setinstvar (_, _, str, exp) ->
+          Pexp_setinstvar (str, sub.expression sub exp)
+      | Sexp_override (_, lst) ->
+          let treat_lst (_, str, exp) =
+            (str, sub.expression sub exp)
+          in
+          let lst = List.map treat_lst lst in
+          Pexp_override lst
+      | Sexp_letmodule (_, str, me, exp) ->
+          Pexp_letmodule (str,
+                          sub.module_expr sub me,
+                          sub.expression sub exp)
+      | Sexp_letexception (ec, exp) ->
+          Pexp_letexception (ec, sub.expression sub exp)
       | Sexp_assert exp -> Pexp_assert (sub.expression sub exp)
+      | Sexp_lazy exp -> Pexp_lazy (sub.expression sub exp)
+      | Sexp_poly (exp, typo) ->
+          Pexp_poly (sub.expression sub exp, typo)
+      | Sexp_object cs -> Pexp_object cs
+      | Sexp_newtype (str, exp) ->
+          Pexp_newtype (str, sub.expression sub exp)
+      | Sexp_pack me ->
+          Pexp_pack (sub.module_expr sub me)
       | Sexp_open (ovf, lid, exp) ->
           Pexp_open (ovf,
                      lid,
                      sub.expression sub exp)
+      | Sexp_extension ext -> Pexp_extension ext
+      | Sexp_unreachable -> Pexp_unreachable
     in
     {pexp_desc; pexp_loc; pexp_attributes}
 
@@ -570,18 +759,29 @@ module StoP = struct
       | Spat_alias (pat, _, name) ->
           Ppat_alias (sub.pattern sub pat, name)
       | Spat_constant c -> Ppat_constant c
+      | Spat_interval (c1, c2) -> Ppat_interval (c1, c2)
       | Spat_tuple pats ->
           Ppat_tuple (List.map (sub.pattern sub) pats)
       | Spat_construct (lid, pato) ->
           Ppat_construct (lid, map_opt (sub.pattern sub) pato)
+      | Spat_variant (label, pato) ->
+          Ppat_variant (label, map_opt (sub.pattern sub) pato)
       | Spat_record (fields, cf) ->
           Ppat_record (List.map (map_snd @@ sub.pattern sub) fields,
                        cf)
+      | Spat_array pats ->
+          Ppat_array (List.map (sub.pattern sub) pats)
       | Spat_or (p1, p2) ->
           Ppat_or (sub.pattern sub p1,
                    sub.pattern sub p2)
       | Spat_constraint (pat, typ) ->
           Ppat_constraint (sub.pattern sub pat, typ)
+      | Spat_type lid -> Ppat_type lid
+      | Spat_lazy pat ->
+          Ppat_lazy (sub.pattern sub pat)
+      | Spat_unpack str -> Ppat_unpack str
+      | Spat_open (lid, pat) ->
+          Ppat_open (lid, sub.pattern sub pat)
     in
     {ppat_desc; ppat_loc; ppat_attributes}
 
@@ -618,6 +818,12 @@ module StoP = struct
       | Sstr_module mb -> Pstr_module (sub.module_binding sub mb)
       | Sstr_modtype mtd -> Pstr_modtype mtd
       | Sstr_open od -> Pstr_open od
+      | Sstr_include me ->
+          let pincl_mod = sub.module_expr sub me in
+          let pincl_loc = Location.none in
+          let pincl_attributes = [] in
+          Pstr_include {pincl_mod; pincl_loc; pincl_attributes}
+
     in
     {pstr_desc; pstr_loc}
 
@@ -723,6 +929,8 @@ module Typed_ast_mapper = struct
         Sexp_tuple (List.map (sub.expression sub) exps)
     | Sexp_construct (lid, expo) ->
         Sexp_construct (lid, map_opt (sub.expression sub) expo)
+    | Sexp_variant (label, expo) ->
+        Sexp_variant (label, map_opt (sub.expression sub) expo)
     | Sexp_record (fields, expo) ->
         Sexp_record (List.map (map_snd @@ sub.expression sub) fields,
                      map_opt (sub.expression sub) expo)
@@ -732,6 +940,8 @@ module Typed_ast_mapper = struct
         Sexp_setfield (sub.expression sub e1,
                        lid,
                        sub.expression sub e2)
+    | Sexp_array exps ->
+        Sexp_array (List.map (sub.expression sub) exps)
     | Sexp_ifthenelse (e1, e2, e3) ->
         Sexp_ifthenelse (sub.expression sub e1,
                          sub.expression sub e2,
@@ -739,32 +949,86 @@ module Typed_ast_mapper = struct
     | Sexp_sequence (e1, e2) ->
         Sexp_sequence (sub.expression sub e1,
                        sub.expression sub e2)
+    | Sexp_while (e1, e2) ->
+        Sexp_while (sub.expression sub e1,
+                    sub.expression sub e2)
+    | Sexp_for (pat, e1, e2, df, e3) ->
+        Sexp_for (sub.pattern sub pat,
+                  sub.expression sub e1,
+                  sub.expression sub e2,
+                  df,
+                  sub.expression sub e3)
     | Sexp_constraint (exp, typ) ->
         Sexp_constraint (sub.expression sub exp, typ)
+    | Sexp_coerce (exp, typo, typ) ->
+        Sexp_coerce (sub.expression sub exp, typo, typ)
+    | Sexp_send (exp, str) ->
+        Sexp_send (sub.expression sub exp, str)
+    | Sexp_new _
+    | Sexp_instvar _ as expr -> expr
+    | Sexp_setinstvar (p1, p2, str, exp) ->
+        Sexp_setinstvar (p1,
+                         p2,
+                         str,
+                         sub.expression sub exp)
+    | Sexp_override (path, lst) ->
+        let treat_lst (path, str, exp) =
+          (path, str, sub.expression sub exp)
+        in
+        Sexp_override (path,
+                       List.map treat_lst lst)
+    | Sexp_letmodule (id, str, me, exp) ->
+        Sexp_letmodule (id,
+                        str,
+                        sub.module_expr sub me,
+                        exp)
+    | Sexp_letexception (ec, exp) ->
+        Sexp_letexception (ec, sub.expression sub exp)
     | Sexp_assert exp -> Sexp_assert (sub.expression sub exp)
+    | Sexp_lazy exp -> Sexp_lazy (sub.expression sub exp)
+    | Sexp_poly (exp, typo) ->
+        Sexp_poly (sub.expression sub exp, typo)
+    | Sexp_object _ as expr -> expr
+    | Sexp_newtype (str, exp) ->
+        Sexp_newtype (str, sub.expression sub exp)
+    | Sexp_pack me ->
+        Sexp_pack (sub.module_expr sub me)
     | Sexp_open (ovf, lid, exp) ->
         Sexp_open (ovf, lid, sub.expression sub exp)
+    | Sexp_extension _
+    | Sexp_unreachable as expr -> expr
     in
     {sexp_desc; sexp_env; sexp_type; sexp_loc; sexp_attrs}
 
   let pattern sub = function
     | Spat_any
     | Spat_var _
-    | Spat_constant _ as pat -> pat
+    | Spat_constant _
+    | Spat_interval _ as pat -> pat
     | Spat_alias (pat, id, name) ->
         Spat_alias (sub.pattern sub pat, id, name)
     | Spat_tuple pats ->
         Spat_tuple (List.map (sub.pattern sub) pats)
     | Spat_construct (lid, pato) ->
         Spat_construct (lid, map_opt (sub.pattern sub) pato)
+    | Spat_variant (label, pato) ->
+        Spat_variant (label, map_opt (sub.pattern sub) pato)
     | Spat_record (fields, cf) ->
         Spat_record (List.map (map_snd @@ sub.pattern sub) fields,
                      cf)
+    | Spat_array pats ->
+        Spat_array (List.map (sub.pattern sub) pats)
     | Spat_or (p1, p2) ->
         Spat_or (sub.pattern sub p1,
                  sub.pattern sub p2)
     | Spat_constraint (pat, typ) ->
         Spat_constraint (sub.pattern sub pat, typ)
+    | Spat_type _ as pat -> pat
+    | Spat_lazy pat ->
+        Spat_lazy (sub.pattern sub pat)
+    | Spat_unpack _ as pat -> pat
+    | Spat_open (lid, pat) ->
+        Spat_open (lid, sub.pattern sub pat)
 
   let case sub {sc_lhs; sc_guard; sc_rhs} =
     let sc_lhs = sub.pattern sub sc_lhs in
@@ -805,6 +1069,8 @@ module Typed_ast_mapper = struct
     | Sstr_exception _
     | Sstr_modtype _
     | Sstr_open _ as item -> item
+    | Sstr_include me ->
+        Sstr_include (sub.module_expr sub me)
 
   let module_binding sub {smb_name; smb_expr} =
     let smb_expr = sub.module_expr sub smb_expr in
@@ -855,6 +1121,7 @@ module Typed_ast_checker = struct
     | None -> []
     | Some x -> f x
   let map_snd f (_, x) = f x
+  let map_third f (_, _, x) = f x
 
   (* Default checker methods
 
@@ -888,6 +1155,7 @@ module Typed_ast_checker = struct
           (sub.cases sub cases)
     | Sexp_tuple exps -> append_map (sub.expression sub) exps
     | Sexp_construct (_, arg) -> map_opt (sub.expression sub) arg
+    | Sexp_variant (_, arg) -> map_opt (sub.expression sub) arg
     | Sexp_record (fields, template) ->
         (* The template report is likely to be empty, so for
            efficiency provide it as the first argument *)
@@ -897,6 +1165,7 @@ module Typed_ast_checker = struct
     | Sexp_field (exp, _) -> sub.expression sub exp
     | Sexp_setfield (exp1, _, exp2) ->
         append_map (sub.expression sub) [exp1; exp2]
+    | Sexp_array exps -> append_map (sub.expression sub) exps
     | Sexp_ifthenelse (exp1, exp2, exp3) ->
         (* Students should almost never write a
            one-armed if, so swapping the order of
@@ -904,24 +1173,55 @@ module Typed_ast_checker = struct
         List.append
           (append_map (sub.expression sub) [exp1; exp2])
           (map_opt (sub.expression sub) exp3)
-    | Sexp_sequence (exp1, exp2) ->
+    | Sexp_sequence (exp1, exp2)
+    | Sexp_while (exp1, exp2) ->
         append_map (sub.expression sub) [exp1; exp2]
-    | Sexp_constraint (exp, _) -> sub.expression sub exp
-    | Sexp_assert exp -> sub.expression sub exp
+    | Sexp_for (pat, exp1, exp2, _, exp3) ->
+        List.append
+          (sub.pattern sub pat)
+          (append_map (sub.expression sub) [exp1; exp2; exp3])
+    | Sexp_constraint (exp, _)
+    | Sexp_coerce (exp, _, _)
+    | Sexp_send (exp, _) -> sub.expression sub exp
+    | Sexp_new _
+    | Sexp_instvar _ -> []
+    | Sexp_setinstvar (_, _, _, exp) -> sub.expression sub exp
+    | Sexp_override (_, lst) ->
+        append_map (map_third @@ sub.expression sub) lst
+    | Sexp_letmodule (_, _, me, exp) ->
+        List.append
+          (sub.module_expr sub me)
+          (sub.expression sub exp)
+    | Sexp_letexception (_, exp)
+    | Sexp_assert exp
+    | Sexp_lazy exp
+    | Sexp_poly (exp, _) -> sub.expression sub exp
+    | Sexp_object _ -> []
+    | Sexp_newtype (_, exp) -> sub.expression sub exp
+    | Sexp_pack me -> sub.module_expr sub me
     | Sexp_open (_, _, exp) -> sub.expression sub exp
+    | Sexp_extension _
+    | Sexp_unreachable -> []
 
   let pattern sub = function
     | Spat_any
     | Spat_var _
-    | Spat_constant _ -> []
+    | Spat_constant _
+    | Spat_interval _ -> []
     | Spat_alias (pat, _, _) -> sub.pattern sub pat
     | Spat_tuple pats -> append_map (sub.pattern sub) pats
-    | Spat_construct (_, pat) -> map_opt (sub.pattern sub) pat
+    | Spat_construct (_, pato) -> map_opt (sub.pattern sub) pato
+    | Spat_variant (_, pato) -> map_opt (sub.pattern sub) pato
     | Spat_record (pats, _) ->
         append_map (map_snd @@ sub.pattern sub) pats
+    | Spat_array pats -> append_map (sub.pattern sub) pats
     | Spat_or (pat1, pat2) ->
         append_map (sub.pattern sub) [pat1; pat2]
     | Spat_constraint (pat, _) -> sub.pattern sub pat
+    | Spat_type _ -> []
+    | Spat_lazy pat -> sub.pattern sub pat
+    | Spat_unpack _ -> []
+    | Spat_open (_, pat) -> sub.pattern sub pat
 
   let case sub {sc_lhs; sc_guard; sc_rhs} =
     List.append
@@ -944,6 +1244,7 @@ module Typed_ast_checker = struct
     | Sstr_exception _
     | Sstr_modtype _
     | Sstr_open _ -> []
+    | Sstr_include me -> sub.module_expr sub me
 
   let module_expr sub = function
     | Smod_ident _ -> []
@@ -982,7 +1283,7 @@ end
 (* Comparing Typed_asts while ignoring concrete strings, so that e.g.
    the scoped tree for "tl" in a context where the List module is opened
    is viewed as equal to the scoped tree for "List.tl".
-   This also ignores location information.
+   This also ignores location information (for supported constructs).
  *)
 module Typed_ast_compare = struct
   open Typed_ast
@@ -1008,6 +1309,9 @@ module Typed_ast_compare = struct
 
   let compare_lid {Asttypes.txt = lid1; _} {Asttypes.txt = lid2; _} =
     lid1 = lid2
+
+  let compare_loc {Asttypes.txt = x1; _} {Asttypes.txt = x2; _} =
+    x1 = x2
 
   let compare_typ typ1 typ2 =
     let typ1 = loc_stripper.M.typ loc_stripper typ1 in
@@ -1043,6 +1347,9 @@ module Typed_ast_compare = struct
     | Sexp_construct (lid1, expo1), Sexp_construct (lid2, expo2) ->
         compare_lid lid1 lid2
         && compare_opt compare_expression expo1 expo2
+    | Sexp_variant (label1, expo1), Sexp_variant (label2, expo2) ->
+        label1 = label2
+        && compare_opt compare_expression expo1 expo2
     | Sexp_record (fields1, expo1), Sexp_record (fields2, expo2) ->
         compare_list
           (compare_tuple2 compare_lid compare_expression)
@@ -1056,6 +1363,8 @@ module Typed_ast_compare = struct
         compare_expression e11 e21
         && compare_lid lid1 lid2
         && compare_expression e12 e22
+    | Sexp_array e1, Sexp_array e2 ->
+        compare_list compare_expression e1 e2
     | Sexp_ifthenelse (e11, e12, e13), Sexp_ifthenelse (e21, e22, e23) ->
         compare_expression e11 e21
         && compare_expression e12 e22
@@ -1063,15 +1372,69 @@ module Typed_ast_compare = struct
     | Sexp_sequence (e11, e12), Sexp_sequence (e21, e22) ->
         compare_expression e11 e21
         && compare_expression e12 e22
+    | Sexp_while (e11, e12), Sexp_while (e21, e22) ->
+        compare_expression e11 e21
+        && compare_expression e12 e22
+    | Sexp_for (p1, e11, e12, df1, e13), Sexp_for (p2, e21, e22, df2, e23) ->
+        compare_pattern p1 p2
+        && compare_expression e11 e21
+        && compare_expression e12 e22
+        && df1 = df2
+        && compare_expression e13 e23
     | Sexp_constraint (e1, typ1), Sexp_constraint (e2, typ2) ->
         compare_expression e1 e2
         && compare_typ typ1 typ2
+    | Sexp_coerce (e1, typo1, typ1), Sexp_coerce (e2, typo2, typ2) ->
+        compare_expression e1 e2
+        && compare_opt compare_typ typo1 typo2
+        && compare_typ typ1 typ2
+    | Sexp_send (e1, loc1), Sexp_send (e2, loc2) ->
+        compare_expression e1 e2
+        && compare_loc loc1 loc2
+    | Sexp_new (p1, _, _), Sexp_new (p2, _, _) -> Path.same p1 p2
+    | Sexp_instvar (p11, p12, _), Sexp_instvar (p21, p22, _) ->
+        Path.same p11 p21
+        && Path.same p12 p22
+    | Sexp_setinstvar (p11, p12, _, e1), Sexp_setinstvar (p21, p22, _, e2) ->
+        Path.same p11 p21
+        && Path.same p12 p22
+        && compare_expression e1 e2
+    | Sexp_override (p1, lst1), Sexp_override (p2, lst2) ->
+        Path.same p1 p2
+        &&
+        compare_list
+          (fun (p1, _, e1) (p2, _, e2) ->
+             Path.same p1 p2 && compare_expression e1 e2)
+          lst1
+          lst2
+    | Sexp_letmodule (id1, _, me1, e1), Sexp_letmodule (id2, _, me2, e2) ->
+        Ident.same id1 id2
+        && compare_module_expression me1 me2
+        && compare_expression e1 e2
+    | Sexp_letexception (ec1, e1), Sexp_letexception (ec2, e2) ->
+        compare_extension_constructor ec1 ec2
+        && compare_expression e1 e2
     | Sexp_assert e1, Sexp_assert e2 ->
         compare_expression e1 e2
+    | Sexp_lazy e1, Sexp_lazy e2 ->
+        compare_expression e1 e2
+    | Sexp_poly (e1, typo1), Sexp_poly (e2, typo2) ->
+        compare_expression e1 e2
+        && compare_opt compare_typ typo1 typo2
+    | Sexp_object cs1, Sexp_object cs2 ->
+        compare_class_structure cs1 cs2
+    | Sexp_newtype (str1, e1), Sexp_newtype (str2, e2) ->
+        compare_loc str1 str2
+        && compare_expression e1 e2
+    | Sexp_pack me1, Sexp_pack me2 ->
+        compare_module_expression me1 me2
     | Sexp_open (ovf1, lid1, e1), Sexp_open (ovf2, lid2, e2) ->
         ovf1 = ovf2
         && compare_lid lid1 lid2
         && compare_expression e1 e2
+    | Sexp_extension ext1, Sexp_extension ext2 ->
+        compare_extension ext1 ext2
+    | Sexp_unreachable, Sexp_unreachable -> true
     | _ -> false
 
   and compare_value_binding {svb_pat = p1; svb_expr = e1} {svb_pat = p2; svb_expr = e2} =
@@ -1091,6 +1454,24 @@ module Typed_ast_compare = struct
   and compare_cases cases1 cases2 =
     compare_list compare_case cases1 cases2
 
+  and compare_module_expression me1 me2 =
+    me1 = me2
+
+  and compare_extension_constructor ec1 ec2 =
+    let ec1 = loc_stripper.M.extension_constructor loc_stripper ec1 in
+    let ec2 = loc_stripper.M.extension_constructor loc_stripper ec2 in
+    ec1 = ec2
+
+  and compare_extension ext1 ext2 =
+    let ext1 = loc_stripper.M.extension loc_stripper ext1 in
+    let ext2 = loc_stripper.M.extension loc_stripper ext2 in
+    ext1 = ext2
+
+  and compare_class_structure cs1 cs2 =
+    let cs1 = loc_stripper.M.class_structure loc_stripper cs1 in
+    let cs2 = loc_stripper.M.class_structure loc_stripper cs2 in
+    cs1 = cs2
+
   and compare_pattern p1 p2 =
     match p1, p2 with
     | Spat_any, Spat_any -> true
@@ -1099,20 +1480,33 @@ module Typed_ast_compare = struct
         Ident.same id1 id2
         && compare_pattern p1 p2
     | Spat_constant c1, Spat_constant c2 -> c1 = c2
+    | Spat_interval (c11, c12), Spat_interval (c21, c22) ->
+        c11 = c21 && c12 = c22
     | Spat_tuple pats1, Spat_tuple pats2 ->
         compare_list compare_pattern pats1 pats2
     | Spat_construct (lid1, pato1), Spat_construct (lid2, pato2) ->
         compare_lid lid1 lid2
         && compare_opt compare_pattern pato1 pato2
+    | Spat_variant (label1, pato1), Spat_variant (label2, pato2) ->
+        label1 = label2
+        && compare_opt compare_pattern pato1 pato2
     | Spat_record (fields1, cf1), Spat_record (fields2, cf2) ->
         compare_list (compare_tuple2 compare_lid compare_pattern) fields1 fields2
         && cf1 = cf2
+    | Spat_array pats1, Spat_array pats2 ->
+        compare_list compare_pattern pats1 pats2
     | Spat_or (p11, p12), Spat_or (p21, p22) ->
         compare_pattern p11 p21
         && compare_pattern p12 p22
     | Spat_constraint (p1, typ1), Spat_constraint (p2, typ2) ->
         compare_pattern p1 p2
         && compare_typ typ1 typ2
+    | Spat_type lid1, Spat_type lid2 -> compare_lid lid1 lid2
+    | Spat_lazy p1, Spat_lazy p2 -> compare_pattern p1 p2
+    | Spat_unpack str1, Spat_unpack str2 -> compare_loc str1 str2
+    | Spat_open (lid1, p1), Spat_open (lid2, p2) ->
+        compare_lid lid1 lid2
+        && compare_pattern p1 p2
     | _ -> false
 
 end
@@ -1435,6 +1829,7 @@ let check_tailcalls var =
         end
     | _ -> false
   in
+  (* Check if a call to var exists anywhere in the given expression *)
   let rec exists_call expr () : expr_result option =
     if is_id_call expr then
       Some {expr; parent = None}
@@ -1463,6 +1858,7 @@ let check_tailcalls var =
         | Sexp_tuple exps ->
             fold_opt (fun exp -> exists_call exp ()) exps
         | Sexp_construct (_, Some exp) -> exists_call exp ()
+        | Sexp_variant (_, Some exp) -> exists_call exp ()
         | Sexp_record (fields, expo) ->
             let in_fields =
               fold_opt (fun (_, exp) -> exists_call exp ()) fields
@@ -1472,6 +1868,8 @@ let check_tailcalls var =
         | Sexp_setfield (exp1, _, exp2) ->
             exists_call exp1 ()
             >>> exists_call exp2
+        | Sexp_array exps ->
+            fold_opt (fun exp -> exists_call exp ()) exps
         | Sexp_ifthenelse (exp1, exp2, expo) ->
             exists_call exp1 ()
             >>> exists_call exp2
@@ -1482,6 +1880,24 @@ let check_tailcalls var =
         | Sexp_constraint (exp, _) -> exists_call exp ()
         | Sexp_assert exp -> exists_call exp ()
         | Sexp_open (_, _, exp) -> exists_call exp ()
+
+        (* Constructs that we specifically do not handle here *)
+        | Sexp_while _
+        | Sexp_for _
+        | Sexp_coerce _
+        | Sexp_send _
+        | Sexp_new _
+        | Sexp_instvar _
+        | Sexp_override _
+        | Sexp_letmodule _
+        | Sexp_letexception _
+        | Sexp_lazy _
+        | Sexp_poly _
+        | Sexp_object _
+        | Sexp_newtype _
+        | Sexp_pack _
+        | Sexp_extension _ -> raise (UnimplementedConstruct "expression")
+
         | _ -> None
       in
       maybe_fill_parent result expr
@@ -1524,6 +1940,8 @@ let check_tailcalls var =
           fold_opt (fun exp -> exists_call exp ()) exps
       | Sexp_construct (_, expo) ->
           exists_call_opt expo ()
+      | Sexp_variant (_, expo) ->
+          exists_call_opt expo ()
       | Sexp_record (fields, expo) ->
           let in_fields =
             fold_opt (fun (_, exp) -> exists_call exp ()) fields
@@ -1534,6 +1952,8 @@ let check_tailcalls var =
       | Sexp_setfield (exp1, _, exp2) ->
           exists_call exp1 ()
           >>> exists_call exp2
+      | Sexp_array exps ->
+          fold_opt (fun exp -> exists_call exp ()) exps
       | Sexp_ifthenelse (exp1, exp2, expo) ->
           exists_call exp1 ()
           >>> check exp2
@@ -1544,6 +1964,24 @@ let check_tailcalls var =
       | Sexp_constraint (exp, _) -> check exp ()
       | Sexp_assert exp -> exists_call exp ()
       | Sexp_open (_, _, exp) -> check exp ()
+
+      (* Constructs that we specifically do not handle here *)
+      | Sexp_while _
+      | Sexp_for _
+      | Sexp_coerce _
+      | Sexp_send _
+      | Sexp_new _
+      | Sexp_instvar _
+      | Sexp_override _
+      | Sexp_letmodule _
+      | Sexp_letexception _
+      | Sexp_lazy _
+      | Sexp_poly _
+      | Sexp_object _
+      | Sexp_newtype _
+      | Sexp_pack _
+      | Sexp_extension _ -> raise (UnimplementedConstruct "expression")
+
       | _ -> None
     in
     maybe_fill_parent result expr
